@@ -68,3 +68,38 @@ static class LandminePatch
 		}
 	}
 }
+
+[HarmonyPatch(typeof(PlayerControllerB))]
+static class PlayerControllerBPatch
+{
+	[HarmonyPrefix]
+	[HarmonyPatch(nameof(PlayerControllerB.TeleportPlayer))]
+	static void PatchTeleportPlayer(PlayerControllerB __instance, Vector3 pos, bool withRotation, float rot, bool allowInteractTrigger, bool enableController)
+	{
+		foreach (PjonkGooseAI pjonkGooseAI in UnityEngine.Object.FindObjectsOfType<PjonkGooseAI>())
+		{
+			if (pjonkGooseAI.targetPlayer == __instance) pjonkGooseAI.positionOfPlayerBeforeTeleport = __instance.transform.position;
+		}
+	}
+}
+
+[HarmonyPatch(typeof(MineshaftElevatorController))]
+static class MineshaftElevatorControllerPatch
+{
+	[HarmonyPostfix]
+	[HarmonyPatch(nameof(MineshaftElevatorController.Update))]
+	static void PatchUpdate(MineshaftElevatorController __instance)
+	{
+		if (__instance.elevatorFinishedMoving)
+        {
+            if (__instance.movingDownLastFrame)
+            {
+                __instance.elevatorIsAtBottom = true;
+            }
+            else
+            {
+                __instance.elevatorIsAtBottom = false;
+            }
+        }
+	}
+}

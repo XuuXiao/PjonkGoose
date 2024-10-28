@@ -1,4 +1,7 @@
-# 1.4.0
+# 1.5.0
+- Pjonk can now use fire exits and elevators to chase the player outside.
+
+## 1.4.0
 - Made things harder.
 
 ## 1.3.2

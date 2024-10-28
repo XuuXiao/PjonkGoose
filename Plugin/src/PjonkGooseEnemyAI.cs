@@ -3,12 +3,20 @@ using System.Diagnostics;
 using GameNetcodeStuff;
 using UnityEngine;
 using UnityEngine.AI;
+using System.Collections;
 using System.Collections.Generic;
 
 namespace PjonkGooseEnemy.src.EnemyStuff;
 public abstract class PjonkGooseEnemyEnemyAI : EnemyAI
 {
     public EnemyAI targetEnemy;
+    public bool usingElevator = false;
+    public Vector3 positionOfPlayerBeforeTeleport = Vector3.zero;
+    public EntranceTeleport lastUsedEntranceTeleport = null!;
+    public Dictionary<EntranceTeleport, Transform[]> exitPoints = new();
+    public MineshaftElevatorController? elevatorScript = null;
+
+
     public override void Start()
     {
         base.Start();
@@ -187,22 +195,123 @@ public abstract class PjonkGooseEnemyEnemyAI : EnemyAI
         LogIfDebugBuild($"{this} setting target to: {targetEnemy.enemyType.enemyName}");
     }
 
-    public void GoThroughEntrance() {
-        var insideEntrancePosition = RoundManager.FindMainEntrancePosition(true, false);
-        var outsideEntrancePosition = RoundManager.FindMainEntrancePosition(true, true);
-        if (isOutside) {
-            SetDestinationToPosition(outsideEntrancePosition);
-            
-            if (Vector3.Distance(transform.position, outsideEntrancePosition) < 1f) {
-                this.agent.Warp(insideEntrancePosition);
-                SetEnemyOutsideServerRpc(false);
+    public void GoThroughEntrance(bool followingPlayer)
+    {
+        Vector3 destination = Vector3.zero;
+        Vector3 destinationAfterTeleport = Vector3.zero;
+        EntranceTeleport entranceTeleportToUse = null!;
+
+        if (followingPlayer)
+        {
+            // Find the closest entrance to the player
+            EntranceTeleport? closestExitPoint = null;
+            foreach (var exitpoint in exitPoints.Keys)
+            {
+                if (closestExitPoint == null || Vector3.Distance(positionOfPlayerBeforeTeleport, exitpoint.transform.position) < Vector3.Distance(positionOfPlayerBeforeTeleport, closestExitPoint.transform.position))
+                {
+                    closestExitPoint = exitpoint;
+                }
             }
-        } else {
-            SetDestinationToPosition(insideEntrancePosition);
-            if (Vector3.Distance(transform.position, insideEntrancePosition) < 1f) {
-                this.agent.Warp(outsideEntrancePosition);
-                SetEnemyOutsideServerRpc(true);
+            if (closestExitPoint != null)
+            {
+                entranceTeleportToUse = closestExitPoint;
+                destination = closestExitPoint.entrancePoint.transform.position;
+                destinationAfterTeleport = closestExitPoint.exitPoint.transform.position;
             }
+        }
+        else
+        {
+            entranceTeleportToUse = lastUsedEntranceTeleport;
+            destination = lastUsedEntranceTeleport.exitPoint.transform.position;
+            destinationAfterTeleport = lastUsedEntranceTeleport.entrancePoint.transform.position;
+        }
+
+        if (elevatorScript != null && NeedsElevator(destination, entranceTeleportToUse, elevatorScript))
+        {
+            UseTheElevator(elevatorScript);
+            return;
+        }
+        if (Vector3.Distance(transform.position, destination) <= 3)
+        {
+            lastUsedEntranceTeleport = entranceTeleportToUse;
+            agent.Warp(destinationAfterTeleport);
+            SetEnemyOutsideServerRpc(!isOutside);
+        }
+        else
+        {
+            agent.SetDestination(destination);
+        }
+    }
+
+    private bool NeedsElevator(Vector3 destination, EntranceTeleport entranceTeleportToUse, MineshaftElevatorController elevatorScript)
+    {
+        // Determine if the elevator is needed based on destination proximity and current position
+        bool nearMainEntrance = Vector3.Distance(destination, RoundManager.FindMainEntrancePosition(true, false)) < Vector3.Distance(destination, entranceTeleportToUse.transform.position);
+        bool closerToTop = Vector3.Distance(transform.position, elevatorScript.elevatorTopPoint.position) < Vector3.Distance(transform.position, elevatorScript.elevatorBottomPoint.position);
+        return !isOutside && ((nearMainEntrance && !closerToTop) || (!nearMainEntrance && closerToTop));
+    }
+
+    public void UseTheElevator(MineshaftElevatorController elevatorScript)
+    {
+        // Determine if we need to go up or down based on current position and destination
+        bool goUp = Vector3.Distance(transform.position, elevatorScript.elevatorBottomPoint.position) < Vector3.Distance(transform.position, elevatorScript.elevatorTopPoint.position);
+        // Check if the elevator is finished moving
+        if (elevatorScript.elevatorFinishedMoving)
+        {
+            if (elevatorScript.elevatorDoorOpen)
+            {
+                // If elevator is not called yet and is at the wrong level, call it
+                if (NeedToCallElevator(elevatorScript, goUp))
+                {
+                    elevatorScript.CallElevatorOnServer(goUp);
+                    MoveToWaitingPoint(elevatorScript, goUp);
+                    return;
+                }
+                // Move to the inside point of the elevator if not already there
+                if (Vector3.Distance(transform.position, elevatorScript.elevatorInsidePoint.position) > 1f)
+                {
+                    agent.SetDestination(elevatorScript.elevatorInsidePoint.position);
+                }
+                else if (!usingElevator)
+                {
+                    // Press the button to start moving the elevator
+                    elevatorScript.PressElevatorButtonOnServer(true);
+                    StartCoroutine(StopUsingElevator(elevatorScript));
+                }
+            }
+        }
+        else
+        {
+            MoveToWaitingPoint(elevatorScript, goUp);
+        }
+    }
+
+    private IEnumerator StopUsingElevator(MineshaftElevatorController elevatorScript)
+    {
+        usingElevator = true;
+        yield return new WaitForSeconds(2f);
+        yield return new WaitUntil(() => elevatorScript.elevatorDoorOpen && elevatorScript.elevatorFinishedMoving);
+        Plugin.ExtendedLogging("Stopped using elevator");
+        usingElevator = false;
+    }
+
+    private bool NeedToCallElevator(MineshaftElevatorController elevatorScript, bool needToGoUp)
+    {
+        return !elevatorScript.elevatorCalled && ((!elevatorScript.elevatorIsAtBottom && needToGoUp) || (elevatorScript.elevatorIsAtBottom && !needToGoUp));
+    }
+
+    private void MoveToWaitingPoint(MineshaftElevatorController elevatorScript, bool needToGoUp)
+    {
+        // Elevator is currently moving
+        // Move to the appropriate waiting point (bottom or top)
+        if (Vector3.Distance(transform.position, elevatorScript.elevatorInsidePoint.position) > 1f)
+        {
+            agent.SetDestination(needToGoUp ? elevatorScript.elevatorBottomPoint.position : elevatorScript.elevatorTopPoint.position);
+        }
+        else
+        {
+            // Wait at the inside point for the elevator to arrive
+            agent.SetDestination(elevatorScript.elevatorInsidePoint.position);
         }
     }
 
@@ -213,7 +322,9 @@ public abstract class PjonkGooseEnemyEnemyAI : EnemyAI
     }
 
     [ClientRpc]
-    public void SetEnemyOutsideClientRpc(bool setOutisde) {
-        this.SetEnemyOutside(setOutisde);
+    public void SetEnemyOutsideClientRpc(bool setOutside)
+    {
+        Plugin.ExtendedLogging("Setting enemy outside: " + setOutside);
+        this.SetEnemyOutside(setOutside);
     }
 }
